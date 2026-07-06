@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepgait3"
+version = "0.1.0.dev0"
+description = "DeepGait v3 — fTIR + 3D pose + CatWalk-compatible gait analysis, next-generation platform"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = {text = "Proprietary"}
+authors = [{name = "DeepGait Team"}]
+dependencies = [
+    # GUI framework (reused from v1 / deep-gailt)
+    "PySide6>=6.6,<7",
+    # Numerics
+    "numpy>=1.26,<3",
+    "scipy>=1.13",
+    "pandas>=2.0",
+    "opencv-python>=4.10",
+    "h5py>=3.10",
+    "pyyaml>=6.0",
+    # Visualization
+    "pyqtgraph>=0.13",
+    "matplotlib>=3.8",
+    "openpyxl>=3.1",
+    # Logging / security
+    "loguru>=0.7",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-qt>=4.4",
+    "pytest-cov>=5",
+    "pytest-xdist>=3.5",
+    "pytest-timeout>=2.3",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+basler = ["pypylon>=7.5"]
+anipose = ["anipose>=0.1"]
+nwb = ["pynwb>=2.7"]
+trigger = ["pyserial>=3.5"]
+onnx = ["onnxruntime>=1.18"]
+hwl = ["PyQt6-stubs>=1.10"]  # stub package for type hints
+
+[project.scripts]
+deepgait3 = "deepgait3.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["deepgait3*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [".venv", "build", "dist", "*.egg-info"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]  # handled by formatter
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
+markers = [
+    "gpu: requires GPU (set DEEPGAIT_HAS_GPU=1)",
+    "hardware: requires camera hardware (set DEEPGAIT_HAS_HW=1)",
+    "slow: long-running tests",
+    "integration: end-to-end integration tests",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:cv2.*",
+    "ignore::PendingDeprecationWarning",
+]

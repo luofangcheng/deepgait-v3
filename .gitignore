@@ -1,0 +1,64 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache
+coverage.xml
+*.cover
+
+# Cython (generated intermediate files — regenerate with setup_cython.py)
+*.c
+*.so.bak
+
+# Generated reports / artifacts
+reports/
+artifacts/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configs
+config.local.yaml
+config.local.ini
+
+# Documentation builds
+docs/_build/
+site/
+
+# Project-specific
+# Per-project user data (not source code)
+projects/
+# Ruff cache
+.ruff_cache/

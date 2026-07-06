@@ -1,0 +1,11 @@
+# Tasks
+- [x] 1. Wipe _legacy_deepgait and stale prefixes
+- [x] 2. Copy `deep-gailt/deepgait/` to `deepgait-v3/deepgait3/deepgait/` (71 .py)
+- [x] 3. Copy `deep-gailt/tests/` (20 .py) to `tests/_legacy_deepgait/`
+- [x] 4. Rewrite all `deepgait.X` imports → `deepgait3.deepgait.X` (1048 statements, 48 files)
+- [x] 5. Re-export legacy contracts from `core.pawprint.models`
+- [x] 6. Wire `gui` subcommand into `deepgait3/cli.py`
+- [x] 7. Validate: 11 tabs in <3s, 56 stages, 357 PNGs
+- [x] 8. Tests: 439 passed, 29 deep-gailt-specific failures
+- [ ] 9. Resolve remaining 29 test failures (cleanup follow-up)
+- [ ] 10. Decommission stale `tests/_legacy_deepgait/_legacy_internal_tests/`
