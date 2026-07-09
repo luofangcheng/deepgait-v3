@@ -1,0 +1,11 @@
+# YOLOv8-seg dataset config for fTIR pawprint detection
+path: /home/luofangcheng/Documents/ZCODE/deepgait-v3/experiment/data
+
+train: images/train
+val:   images/val
+
+# Single class
+names:
+  0: paw
+
+nc: 1

@@ -38,7 +38,7 @@ class GaitProjectTab(QWidget):
     """Project creation and recent-projects browser.
 
     Emits ``project_opened`` when the user opens or creates a project.
-    Other tabs (新建实验, 数据分析) listen for this to update their
+    Other tabs (数据采集, 数据分析) listen for this to update their
     current-project display.
     """
 

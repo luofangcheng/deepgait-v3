@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from deepgait3.core.pawprint.single_frame import detect_single_frame
+from deepgait3.core.pawprint.tracker import IoUFootprintTracker
 from deepgait3.core._legacy import gait_export, gait_ftir, gait_pressure, foot_pattern
 from deepgait3.core._legacy.background_model import RollingMedianBackground
 from deepgait3.core._legacy.project_manager import animal_data_dir
@@ -114,6 +115,9 @@ class BatchAnalysisWorker(QThread):
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
         bg = RollingMedianBackground(warmup_frames=30)
+        self._preview_tracker = IoUFootprintTracker(
+            frame_shape=(h, w), iou_min=0.3, max_gap_frames=3,
+        )
         accum_centroids: List = []
         all_in_stance = {p: [] for p in PAW_ORDER}
         all_intensity = {p: [] for p in PAW_ORDER}
@@ -143,35 +147,29 @@ class BatchAnalysisWorker(QThread):
             else:
                 bg_G = np.zeros((h, w), dtype=np.float32)
 
-            seq = detect_single_frame(
+            footmasks = detect_single_frame(
                 frame, bg_G,
-                tau_paw=self.tau_paw,
                 min_area_px=self.min_area_px,
-                D_merge_px=23.0,
-                walkway_roi=(0, 0, w, h),
-                bbox_pad_px=8,
-                mouse_det=None,
-                body_axis=body_axis,
-                in_stance_threshold_px=30,
             )
 
-            for fm in seq.feet.values():
-                if fm.is_in_stance:
-                    accum_centroids.append(fm.centroid)
+            for fm in footmasks:
+                if fm.total_area_px >= 30:  # in-stance threshold
+                    accum_centroids.append(fm.centroid_px)
             if len(accum_centroids) > 60:
                 accum_centroids = accum_centroids[-60:]
 
             for paw in PAW_ORDER:
-                foot = seq.feet.get(paw)
-                all_in_stance[paw].append(int(foot is not None and foot.is_in_stance))
-                all_intensity[paw].append(float(foot.intensity_max) if foot else 0.0)
-                all_centroids_x[paw].append(float(foot.centroid[0]) if foot else 0.0)
-                all_centroids_y[paw].append(float(foot.centroid[1]) if foot else 0.0)
-                all_area_px[paw].append(float(foot.area_px) if foot else 0.0)
-                if foot is not None and foot.is_in_stance:
+                # paw identity not yet assigned (Stage 2) — accumulate raw stats
+                foot = footmasks[0] if footmasks else None  # placeholder
+                all_in_stance[paw].append(1 if (foot and foot.total_area_px >= 30) else 0)
+                all_intensity[paw].append(float(foot.peak_intensity) if foot else 0.0)
+                all_centroids_x[paw].append(float(foot.centroid_px[0]) if foot else 0.0)
+                all_centroids_y[paw].append(float(foot.centroid_px[1]) if foot else 0.0)
+                all_area_px[paw].append(float(foot.total_area_px) if foot else 0.0)
+                if foot is not None and foot.total_area_px >= 30:
                     all_pressure[paw].append({
-                        "frame": fi, "x": float(foot.centroid[0]),
-                        "y": float(foot.centroid[1]),
+                        "frame": fi, "x": float(foot.centroid_px[0]),
+                        "y": float(foot.centroid_px[1]),
                         "area": float(foot.area_px),
                         "intensity": float(foot.intensity_max),
                     })
@@ -276,6 +274,7 @@ class GaitAnalysisTab(QWidget):
         self._preview_cap: Optional[cv2.VideoCapture] = None
         self._preview_bg: Optional[RollingMedianBackground] = None
         self._preview_accum: Optional[np.ndarray] = None
+        self._preview_tracker: Optional[IoUFootprintTracker] = None
         self._preview_count = 0
         self._preview_fps = 60.0
 
@@ -331,7 +330,7 @@ class GaitAnalysisTab(QWidget):
         preview_ctrl.addWidget(self.preview_status)
         main.addLayout(preview_ctrl)
 
-        # -- 参数微调 (same layout as 新建实验 tab) ---------------------------
+        # -- 参数微调 (same layout as 数据采集 tab) ---------------------------
         tune_gb = QGroupBox("参数微调")
         tune_l = QVBoxLayout(tune_gb)
         tune_l.setSpacing(4)
@@ -497,7 +496,7 @@ class GaitAnalysisTab(QWidget):
         self._preview_count = 0
 
     def _preview_tick(self) -> None:
-        """Single-video preview loop — same pattern as 新建实验 tab."""
+        """Single-video preview loop — same pattern as 数据采集 tab."""
         cap = self._preview_cap
         if cap is None:
             return
@@ -522,23 +521,19 @@ class GaitAnalysisTab(QWidget):
                 bg_G = np.zeros((h, w), dtype=np.float32)
             body_axis = ((int(w * 0.2), int(h * 0.5)),
                          (int(w * 0.8), int(h * 0.5)))
-            seq = detect_single_frame(
+            footmasks = detect_single_frame(
                 frame_bgr, bg_G,
-                tau_paw=self.tau_spin.value(),
                 min_area_px=self.paw_spin.value(),
-                D_merge_px=23.0,
-                walkway_roi=(0, 0, w, h),
-                bbox_pad_px=8,
-                mouse_det=None,
-                body_axis=body_axis,
-                in_stance_threshold_px=30,
             )
         except Exception:
-            from deepgait3.core._legacy.footprint_v2 import FootprintSequence
-            seq = FootprintSequence()
+            footmasks = []
 
         # Accumulate footprints
-        self._update_footprint(frame_bgr, seq)
+        # Feed tracker
+        if self._preview_tracker is not None:
+            self._preview_tracker.update(self._frame_count, footmasks)
+
+        self._update_footprint(frame_bgr, footmasks)
 
         # Render every 3rd frame
         if self._preview_count % 3 == 0:
@@ -550,28 +545,50 @@ class GaitAnalysisTab(QWidget):
         )
 
     # ------------------------------------------------------------------
-    # Footprint accumulation (same as 新建实验 tab)
+    # Footprint accumulation (same as 数据采集 tab)
     # ------------------------------------------------------------------
-    def _update_footprint(self, frame_bgr: np.ndarray, seq) -> None:
+    def _update_footprint(self, frame_bgr: np.ndarray, footmasks: list) -> None:
         h, w = frame_bgr.shape[:2]
         if self._preview_accum is None:
-            self._preview_accum = np.zeros((h, w, 3), dtype=np.uint8)
-        green = frame_bgr[:, :, 1].astype(np.uint8)
-        bg = self._preview_bg.get_median() if self._preview_bg is not None else None
-        if bg is not None:
-            base = bg[:, :, 1].astype(np.int16)
-            signal = np.clip(green.astype(np.int16) - base, 0, 255).astype(np.uint8)
-        else:
-            signal = green
-        for foot in seq.all_feet:
-            x, y, bw, bh = foot.bbox
-            x0, y0 = max(0, x), max(0, y)
-            x1, y1 = min(w, x + bw), min(h, y + bh)
-            if x1 <= x0 or y1 <= y0:
+            self._preview_accum = np.zeros((h, w), dtype=np.float32)
+        for fm in footmasks:
+            px1, py1, px2, py2 = fm.bbox_xyxy_padded
+            if px2 <= px1 or py2 <= py1:
                 continue
-            paw_signal = signal[y0:y1, x0:x1]
-            current = self._preview_accum[y0:y1, x0:x1, 1]
-            np.maximum(current, paw_signal, out=current)
+            crop_h, crop_w = py2 - py1, px2 - px1
+            mask = fm.mask_padded.astype(np.float32)
+            intensity = fm.raw_intensity_crop
+            if mask.shape[:2] != (crop_h, crop_w):
+                mask = cv2.resize(mask, (crop_w, crop_h))
+            if intensity.shape[:2] != (crop_h, crop_w):
+                intensity = cv2.resize(intensity, (crop_w, crop_h))
+            region = self._preview_accum[py1:py2, px1:px2]
+            signal = np.maximum(intensity, 0) * mask
+            np.maximum(region, signal, out=region)
+
+    def _build_cumulative_from_tracks(self, tracks: list) -> None:
+        """Build cumulative image from tracked footprints (matches experiment)."""
+        import cv2
+        if self._preview_accum is None:
+            return
+        h, w = self._preview_accum.shape
+        cum = np.zeros((h, w), dtype=np.float32)
+        for track in tracks:
+            for _, fm in track.foots:
+                px1, py1, px2, py2 = fm.bbox_xyxy_padded
+                if px2 <= px1 or py2 <= py1:
+                    continue
+                ch, cw = py2 - py1, px2 - px1
+                intensity = fm.raw_intensity_crop
+                mask = fm.mask_padded.astype(np.float32)
+                if intensity.shape[:2] != (ch, cw):
+                    intensity = cv2.resize(intensity, (cw, ch))
+                if mask.shape[:2] != (ch, cw):
+                    mask = cv2.resize(mask, (cw, ch))
+                region = cum[py1:py2, px1:px2]
+                signal = np.maximum(intensity, 0) * mask
+                np.maximum(region, signal, out=region)
+        self._preview_accum = cum
 
     def _show_preview(self, frame_bgr: np.ndarray) -> None:
         h, w = frame_bgr.shape[:2]
@@ -592,29 +609,23 @@ class GaitAnalysisTab(QWidget):
     def _show_footprint(self) -> None:
         if self._preview_accum is None:
             return
-        display = self._preview_accum.copy()
-        g = display[:, :, 1]
-        # Opening morphology to break tail/belly streaks
-        g_mask = (g > 5).astype(np.uint8) * 255
-        if g_mask.any():
-            open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
-            cleaned = cv2.morphologyEx(g_mask, cv2.MORPH_OPEN, open_k)
-            g = cv2.bitwise_and(g, cleaned)
-        # Green-on-black with mask-protected background
-        g_f = g.astype(np.float32)
-        mask = g > 0
+        acc = self._preview_accum.copy()  # float32 (H, W)
+        mask = (acc > 5).astype(np.uint8) * 255
         if mask.any():
-            vals = g_f[mask]
-            lo, hi = float(vals.min()), float(vals.max())
-            norm = np.clip((g_f - lo) / (hi - lo if hi > lo else 1.0), 0.0, 1.0)
-        else:
-            norm = np.zeros_like(g_f)
-        bright = self.brightness_spin.value()
-        display[:, :, 0] = 0
-        display[:, :, 1] = np.where(
-            mask, (norm * 255.0 * bright).clip(0, 255).astype(np.uint8), 0,
-        )
-        display[:, :, 2] = 0
+            open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+            cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_k)
+            acc = np.where(cleaned > 0, acc, 0)
+        # Green-on-black
+        valid = acc > 0
+        display = np.zeros((*acc.shape, 3), dtype=np.uint8)
+        if valid.any():
+            lo, hi = float(acc[valid].min()), float(acc[valid].max())
+            denom = hi - lo if hi > lo else 1.0
+            norm = np.clip((acc - lo) / denom, 0.0, 1.0)
+            bright = self.brightness_spin.value()
+            display[:, :, 1] = np.where(
+                valid, (norm * 255.0 * bright).clip(0, 255).astype(np.uint8), 0,
+            )
         h, w = display.shape[:2]
         pw = max(self.footprint_view.width(), 480)
         ph = max(self.footprint_view.height(), 96)

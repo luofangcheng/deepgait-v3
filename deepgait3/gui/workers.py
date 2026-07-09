@@ -13,6 +13,8 @@ from PySide6.QtCore import QThread, Signal
 from deepgait3.core._legacy import footprint, intensity, pipeline, results
 from deepgait3.core._legacy.dlc_config import ProjectSpec
 from deepgait3.core._legacy.dlc_workflow import DLCNotInstalledError
+from deepgait3.core.pawprint.trim import TrimError, trim_video
+from deepgait3.core.pawprint.yolo_detector import YoloPawDetector
 
 
 class GaitWorker(QThread):
@@ -63,64 +65,49 @@ class GaitWorker(QThread):
 
 
 class FTIRWorker(QThread):
-    """Run FTIR footprint + intensity analysis in a background thread.
+    """Run YOLO footprint detection in a background thread.
 
-    Phase 3 W10: migrated from the v1 ``footprint.analyze_frame`` to the
-    v2 :func:`deepgait3.core._legacy.footprint_v2.analyze_frame_v2`, which adds
-    MouseWalker-style background modelling, union-find 4-paw grouping,
-    and L/R + F/H quadrant classification (W6 deliverable).
-
-    W18 (2026-07-05): replaced ``footprint_v2.analyze_frame_v2`` with
-    :func:`deepgait3.core.pawprint.single_frame.detect_single_frame`, which uses
-    the pawprint module's ``detect_blobs`` + ``cluster_blobs_into_feet``
-    primitives (tau_paw thresholding, DBSCAN merging) backed by the
-    deepgait-v2 dynamics_v0.4.2 algorithm.
+    Uses :func:`deepgait3.core.pawprint.single_frame.detect_single_frame`
+    which runs YOLOv8n-seg on GPU, returning native pawprint FootMask objects
+    with precise mask data.
     """
 
-    result_ready = Signal(object)   # FootprintSequence (footprint_v2)
+    result_ready = Signal(object)   # list[FootMask] (pawprint FootMask)
     progress = Signal(str)
     error = Signal(str)
 
     def __init__(
         self,
-        frame: Any,  # numpy array (BGR)
-        body_axis: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        frame: Any,
+        min_area_px: int = 5,
+        conf: float = 0.25,
+        background: Any | None = None,
+        # accepted for caller compat, ignored
+        tau_paw: float = 0,
+        D_merge_px: float = 0,
+        walkway_roi: tuple = (),
+        bbox_pad_px: int = 0,
+        body_axis: Any = None,
         px_per_mm: float | None = None,
-        hsv_lower: tuple[int, int, int] = (35, 50, 30),
-        hsv_upper: tuple[int, int, int] = (85, 255, 255),
-        min_area_px: int = 50,
-        background: Any | None = None,   # BackgroundModel or None
-        in_stance_threshold_px: int = 30,
-        # pawprint-specific (W18)
-        tau_paw: float = 10.0,
-        D_merge_px: float = 23.0,
-        walkway_roi: tuple[int, int, int, int] = (0, 15, 1920, 360),
-        bbox_pad_px: int = 8,
+        hsv_lower: tuple = (),
+        hsv_upper: tuple = (),
+        in_stance_threshold_px: int = 0,
     ) -> None:
         super().__init__()
         self.frame = frame
-        self.body_axis = body_axis
-        self.px_per_mm = px_per_mm
-        self.hsv_lower = hsv_lower
-        self.hsv_upper = hsv_upper
         self.min_area_px = min_area_px
+        self.conf = conf
         self.background = background
-        self.in_stance_threshold_px = in_stance_threshold_px
-        self.tau_paw = tau_paw
-        self.D_merge_px = D_merge_px
-        self.walkway_roi = walkway_roi
-        self.bbox_pad_px = bbox_pad_px
 
     def run(self) -> None:
         try:
             import numpy as np
             from deepgait3.core.pawprint.single_frame import detect_single_frame
 
-            self.progress.emit("正在分割足印 (pawprint tau=%.1f)..." % self.tau_paw)
+            self.progress.emit("YOLO pawprint detection...")
 
-            # Compute green-channel background.
+            # Compute green-channel background
             if self.background is not None:
-
                 bg_median = self.background.get_median()
                 if bg_median is not None and bg_median.size > 0:
                     bg_G = bg_median[:, :, 1].astype(np.float32)
@@ -129,21 +116,13 @@ class FTIRWorker(QThread):
             else:
                 bg_G = self.frame[:, :, 1].astype(np.float32)
 
-            seq = detect_single_frame(
-                self.frame,
-                bg_G,
-                tau_paw=self.tau_paw,
+            footmasks = detect_single_frame(
+                self.frame, bg_G,
                 min_area_px=self.min_area_px,
-                D_merge_px=self.D_merge_px,
-                walkway_roi=self.walkway_roi,
-                bbox_pad_px=self.bbox_pad_px,
-                mouse_det=None,
-                px_per_mm=self.px_per_mm,
-                body_axis=self.body_axis,
-                in_stance_threshold_px=self.in_stance_threshold_px,
+                conf=self.conf,
             )
-            self.progress.emit(f"分析完成 — {seq.n_feet} 足检测")
-            self.result_ready.emit(seq)
+            self.progress.emit(f"分析完成 — {len(footmasks)} 足检测")
+            self.result_ready.emit(footmasks)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -283,3 +262,76 @@ class CameraWorker(QThread):
                 self._cap.release()
             self._cap = None
 
+
+
+class TrimWorker(QThread):
+    """Background trim worker.  Processes a list of videos sequentially.
+
+    For each video:
+      1. ``video_started(idx, total, src_path)``
+      2. ``video_progress(idx, total, pct, msg)`` during YOLO + tracker + encode
+      3. ``video_done(idx, src_path, dst_path)`` on success
+         OR ``video_failed(idx, src_path, error_msg)`` on failure
+
+    After the batch:
+      ``all_done(success_count, failed_count)`` is emitted exactly once.
+    """
+
+    video_started = Signal(int, int, str)
+    video_progress = Signal(int, int, int, str)
+    video_done = Signal(int, str, str)
+    video_failed = Signal(int, str, str)
+    all_done = Signal(int, int)
+
+    def __init__(
+        self,
+        jobs: list[dict],
+        *,
+        model_path: str | Path | None = None,
+        iou_min: float = 0.3,
+        max_gap_frames: int = 3,
+        min_area_px: int = 5,
+    ) -> None:
+        super().__init__()
+        self.jobs = jobs  # each: {"src": Path, "dst": Path}
+        self.model_path = model_path
+        self.iou_min = iou_min
+        self.max_gap_frames = max_gap_frames
+        self.min_area_px = min_area_px
+        self._detector: YoloPawDetector | None = None
+
+    @property
+    def detector(self) -> YoloPawDetector:
+        if self._detector is None:
+            self._detector = YoloPawDetector(model_path=self.model_path)
+        return self._detector
+
+    def run(self) -> None:
+        success = 0
+        failed = 0
+        total = len(self.jobs)
+        for idx, job in enumerate(self.jobs):
+            src = Path(job["src"])
+            dst = Path(job["dst"])
+            self.video_started.emit(idx, total, str(src))
+            try:
+                def cb(phase: str, pct: int, msg: str) -> None:
+                    self.video_progress.emit(idx, total, pct, msg)
+
+                result = trim_video(
+                    src, dst,
+                    detector=self.detector,
+                    iou_min=self.iou_min,
+                    max_gap_frames=self.max_gap_frames,
+                    min_area_px=self.min_area_px,
+                    progress_cb=cb,
+                )
+                self.video_done.emit(idx, str(src), str(result["dst"]))
+                success += 1
+            except TrimError as e:
+                self.video_failed.emit(idx, str(src), str(e))
+                failed += 1
+            except Exception as e:
+                self.video_failed.emit(idx, str(src), f"unexpected: {e}")
+                failed += 1
+        self.all_done.emit(success, failed)

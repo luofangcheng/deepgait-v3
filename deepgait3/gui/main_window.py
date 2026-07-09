@@ -195,12 +195,12 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(tab, "新建项目")
 
     def _build_experiment_tab(self) -> None:
-        """Tab 3: 新建实验 — C1 live acquisition + footprint preview."""
+        """Tab 3: 数据采集 — 5-camera live preview + recording (formerly 新建实验)."""
         from deepgait3.gui.gait_experiment_tab import GaitExperimentTab
         tab = GaitExperimentTab()
         tab.set_app_state(self.app_state)
         self._tab_widgets["experiment"] = tab
-        self.tabs.addTab(tab, "新建实验")
+        self.tabs.addTab(tab, "数据采集")
 
     def _build_analysis_tab(self) -> None:
         """Tab 4: 数据分析 — batch processing + pressure heatmap."""

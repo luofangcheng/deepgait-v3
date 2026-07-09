@@ -62,3 +62,13 @@ site/
 projects/
 # Ruff cache
 .ruff_cache/
+
+# Experiment artifacts (keep code, ignore data and model weights)
+experiment/data/
+experiment/outputs/
+# Model weights
+*.pt
+*.pth
+*.pkl
+# Training runs
+runs/

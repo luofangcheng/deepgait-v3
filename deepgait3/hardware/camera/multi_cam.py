@@ -360,6 +360,12 @@ class MultiCameraManager:
         self._sync_tolerance_ms = float(sync_tolerance_ms)
         self._bus = FrameBus(self._roles)
         self._sync_samples: deque = deque(maxlen=1024)
+        # Per-camera FPS estimation (W22): sliding window of hardware
+        # timestamp_ns samples. Locked by self._lock below.
+        self._fps_window_size: int = 30
+        self._fps_timestamps: Dict[str, "deque[int]"] = {
+            r: deque(maxlen=self._fps_window_size) for r in self._roles
+        }
         self._lock = threading.Lock()
         self._running = False
 
@@ -470,6 +476,12 @@ class MultiCameraManager:
     # ---- sync monitoring --------------------------------------------------
     def _on_frame(self, role: str, frame: FrameInfo) -> None:
         self._bus.push(role, frame)
+        # W22: also append the hardware timestamp to the per-role
+        # sliding window so get_fps_per_role() can compute a real FPS.
+        with self._lock:
+            dq = self._fps_timestamps.get(role)
+            if dq is not None:
+                dq.append(frame.timestamp_ns)
 
     def _record_sync(self, snap: Dict[str, FrameInfo]) -> None:
         timestamps = [f.timestamp_ns for f in snap.values()]
@@ -501,6 +513,35 @@ class MultiCameraManager:
             per_role_delta_ms=dict(per_role),
             sample_size=len(samples),
         )
+
+    # ---- per-camera FPS ---------------------------------------------------
+    def get_fps_per_role(self) -> Dict[str, float]:
+        """Return a sliding-window FPS estimate per camera role.
+
+        The estimate is derived from the per-role deque of hardware
+        ``timestamp_ns`` samples appended in :meth:`_on_frame`. The
+        window size is ``_fps_window_size`` (default 30 frames).
+
+        Returns
+        -------
+        dict
+            ``{role: fps}``. When the window for a role has fewer than
+            two samples (e.g. just after start), or when the delta is
+            non-positive (clock anomaly), the value is ``float('nan')``.
+            Callers should treat NaN as "no data yet" and render "—".
+        """
+        out: Dict[str, float] = {}
+        with self._lock:
+            for role, dq in self._fps_timestamps.items():
+                if len(dq) < 2:
+                    out[role] = float("nan")
+                    continue
+                dt_s = (dq[-1] - dq[0]) / 1e9
+                if dt_s <= 0:
+                    out[role] = float("nan")
+                    continue
+                out[role] = (len(dq) - 1) / dt_s
+        return out
 
     # ---- context manager --------------------------------------------------
     def __enter__(self) -> "MultiCameraManager":
